@@ -1,262 +1,365 @@
-;; STAGE 2: ENHANCED LIBRARY MANAGEMENT SYSTEM
-;; Added book catalog, due dates, fines, and patron reading lists
+;; BOOK-MANAGEMENT-PLATFORM - Enhanced Digital Archive System
+;; Comprehensive reading platform with patron management and publication tracking
 
-;; Enhanced error codes
-(define-constant ERR-UNAUTHORIZED u200)
-(define-constant ERR-PATRON-EXISTS u201)
-(define-constant ERR-PATRON-NOT-FOUND u202)
-(define-constant ERR-BOOK-UNAVAILABLE u203)
-(define-constant ERR-READING-LIST-FULL u204)
-(define-constant ERR-BOOK-NOT-FOUND u205)
+;; System error responses
+(define-constant UNAUTHORIZED-ACCESS u300)
+(define-constant PATRON-EXISTS u301)
+(define-constant PATRON-MISSING u302)
+(define-constant PUBLICATION-UNAVAILABLE u303)
+(define-constant WISHLIST-OVERFLOW u304)
+(define-constant PUBLICATION-IN-USE u305)
+(define-constant HOLD-QUOTA-EXCEEDED u306)
 
-;; System limits
-(define-constant MAX-READING-LIST-SIZE u20)
-(define-constant LOAN-DURATION u1440) ; 24 hours in minutes
+;; Platform limitations
+(define-constant PUBLICATION-TITLE-MAX u1024)
+(define-constant WISHLIST-MAX-SIZE u25)
+(define-constant LOAN-PERIOD-MAX u2160)
+(define-constant HOLD-REQUEST-LIMIT u10)
 
-;; Enhanced counters
-(define-data-var total-patrons uint u0)
-(define-data-var total-checkouts uint u0)
-(define-data-var total-books uint u0)
+;; Archive metrics
+(define-data-var circulation-count uint u0)
+(define-data-var registered-patrons uint u0)
+(define-data-var checkout-sequence-id uint u0)
+(define-data-var publication-inventory uint u0)
+(define-data-var hold-requests-total uint u0)
 
-;; Enhanced patron registry with reading lists
-(define-map patrons principal 
+;; Core data models
+(define-map archive-patrons principal 
   {
-    is-registered: bool,
-    card-number: (buff 32),
-    join-date: uint,
-    total-borrowed: uint,
-    outstanding-fines: uint
+    account-status: bool,
+    patron-id: (buff 33),
+    enrollment-timestamp: uint,
+    checkout-history: uint,
+    access-level: uint,
+    penalty-balance: uint
   }
 )
 
-;; Book catalog
-(define-map books uint 
+(define-map checkout-records uint 
   {
-    title: (buff 512),
-    author: (buff 256),
-    isbn: (buff 64),
-    is-available: bool,
-    added-by: principal,
-    total-borrows: uint
-  }
-)
-
-;; Enhanced checkout records with due dates
-(define-map checkouts uint 
-  {
+    issuer: principal,
     patron: principal,
-    book-id: uint,
-    checkout-date: uint,
-    due-date: uint,
-    is-returned: bool,
-    fine-amount: uint
+    publication-data: (buff 1024),
+    issue-timestamp: uint,
+    return-deadline: uint,
+    completion-status: bool,
+    penalty-amount: uint
   }
 )
 
-;; Patron reading lists
-(define-map reading-lists principal (list 20 uint))
+(define-map publication-catalog uint 
+  {
+    publication-name: (buff 1024),
+    creator: (buff 512),
+    identifier: (buff 64),
+    cataloger: principal,
+    catalog-date: uint,
+    availability-flag: bool,
+    active-patron: (optional principal),
+    usage-counter: uint
+  }
+)
 
-;; Time utilities
-(define-private (current-time)
+(define-map hold-queue uint 
+  {
+    target-publication: uint,
+    requesting-patron: principal,
+    request-timestamp: uint,
+    queue-status: bool
+  }
+)
+
+(define-map patron-wishlists principal (list 25 uint))
+(define-map patron-holds principal (list 10 uint))
+
+;; Time tracking utility
+(define-private (fetch-timestamp)
   (default-to u0 (get-block-info? time u0))
 )
 
-(define-private (calculate-due-date (checkout-time uint))
-  (+ checkout-time LOAN-DURATION)
+;; Data access functions
+(define-read-only (fetch-patron-info (patron principal))
+  (map-get? archive-patrons patron)
 )
 
-;; Read-only functions
-(define-read-only (is-patron-registered (patron principal))
-  (is-some (map-get? patrons patron))
+(define-read-only (validate-patron-status (patron principal))
+  (is-some (map-get? archive-patrons patron))
 )
 
-(define-read-only (get-patron (patron principal))
-  (map-get? patrons patron)
+(define-read-only (fetch-checkout-record (record-id uint))
+  (map-get? checkout-records record-id)
 )
 
-(define-read-only (get-book (book-id uint))
-  (map-get? books book-id)
+(define-read-only (fetch-publication-info (publication-id uint))
+  (map-get? publication-catalog publication-id)
 )
 
-(define-read-only (get-checkout (checkout-id uint))
-  (map-get? checkouts checkout-id)
+(define-read-only (fetch-hold-info (hold-id uint))
+  (map-get? hold-queue hold-id)
 )
 
-(define-read-only (get-reading-list (patron principal))
-  (default-to (list) (map-get? reading-lists patron))
+(define-read-only (fetch-patron-wishlist (patron principal))
+  (default-to (list) (map-get? patron-wishlists patron))
 )
 
-(define-read-only (get-system-stats)
+(define-read-only (fetch-patron-holds (patron principal))
+  (default-to (list) (map-get? patron-holds patron))
+)
+
+(define-read-only (platform-metrics)
   {
-    total-patrons: (var-get total-patrons),
-    total-checkouts: (var-get total-checkouts),
-    total-books: (var-get total-books)
+    total-checkouts: (var-get circulation-count),
+    active-patrons: (var-get registered-patrons),
+    catalog-size: (var-get publication-inventory),
+    pending-holds: (var-get hold-requests-total)
   }
 )
 
-;; Register new patron
-(define-public (register-patron (card-number (buff 32)))
+;; Patron enrollment system
+(define-public (enroll-patron (patron-card (buff 33)))
   (let (
-    (patron tx-sender)
-    (registration-time (current-time))
+    (new-patron tx-sender)
+    (enrollment-time (fetch-timestamp))
   )
-    (asserts! (not (is-patron-registered patron)) 
-              (err ERR-PATRON-EXISTS))
+    ;; Block duplicate enrollments
+    (asserts! (not (validate-patron-status new-patron)) 
+              (err PATRON-EXISTS))
     
-    (map-set patrons patron
+    ;; Create patron record
+    (map-set archive-patrons new-patron
       {
-        is-registered: true,
-        card-number: card-number,
-        join-date: registration-time,
-        total-borrowed: u0,
-        outstanding-fines: u0
+        account-status: true,
+        patron-id: patron-card,
+        enrollment-timestamp: enrollment-time,
+        checkout-history: u0,
+        access-level: u1,
+        penalty-balance: u0
       }
     )
     
-    ;; Initialize empty reading list
-    (map-set reading-lists patron (list))
+    ;; Setup patron collections
+    (map-set patron-wishlists new-patron (list))
+    (map-set patron-holds new-patron (list))
     
-    (var-set total-patrons (+ (var-get total-patrons) u1))
-    
+    ;; Increment patron count
+    (var-set registered-patrons (+ (var-get registered-patrons) u1))
     (ok true)
   )
 )
 
-;; Add book to catalog
-(define-public (add-book (title (buff 512)) (author (buff 256)) (isbn (buff 64)))
+;; Publication cataloging
+(define-public (catalog-publication (name (buff 1024)) (creator (buff 512)) (identifier (buff 64)))
   (let (
-    (librarian tx-sender)
-    (book-id (var-get total-books))
+    (cataloger tx-sender)
+    (publication-id (var-get publication-inventory))
+    (catalog-time (fetch-timestamp))
   )
-    (asserts! (is-patron-registered librarian) 
-              (err ERR-PATRON-NOT-FOUND))
+    ;; Validate cataloger credentials
+    (asserts! (validate-patron-status cataloger) 
+              (err PATRON-MISSING))
     
-    (map-set books book-id
+    ;; Register publication
+    (map-set publication-catalog publication-id
       {
-        title: title,
-        author: author,
-        isbn: isbn,
-        is-available: true,
-        added-by: librarian,
-        total-borrows: u0
+        publication-name: name,
+        creator: creator,
+        identifier: identifier,
+        cataloger: cataloger,
+        catalog-date: catalog-time,
+        availability-flag: true,
+        active-patron: none,
+        usage-counter: u0
       }
     )
     
-    (var-set total-books (+ book-id u1))
+    ;; Update inventory count
+    (var-set publication-inventory (+ publication-id u1))
     
-    (ok book-id)
+    (ok publication-id)
   )
 )
 
-;; Checkout a book
-(define-public (checkout-book (patron principal) (book-id uint))
+;; Publication checkout process
+(define-public (issue-checkout (target-patron principal) (publication-info (buff 1024)))
   (let (
-    (librarian tx-sender)
-    (checkout-id (var-get total-checkouts))
-    (checkout-time (current-time))
-    (due-date (calculate-due-date checkout-time))
-    (book-info (unwrap! (get-book book-id) (err ERR-BOOK-NOT-FOUND)))
-    (patron-info (unwrap! (get-patron patron) (err ERR-PATRON-NOT-FOUND)))
-    (current-reading-list (get-reading-list patron))
+    (staff-member tx-sender)
+    (checkout-id (var-get circulation-count))
+    (issue-time (fetch-timestamp))
+    (deadline (+ issue-time LOAN-PERIOD-MAX))
+    (staff-record (unwrap! (fetch-patron-info staff-member) (err PATRON-MISSING)))
+    (patron-wishlist (fetch-patron-wishlist target-patron))
   )
-    (asserts! (is-patron-registered librarian) 
-              (err ERR-PATRON-NOT-FOUND))
+    ;; Validate staff credentials
+    (asserts! (validate-patron-status staff-member) 
+              (err PATRON-MISSING))
     
-    (asserts! (get is-available book-info) 
-              (err ERR-BOOK-UNAVAILABLE))
+    ;; Validate target patron
+    (asserts! (validate-patron-status target-patron) 
+              (err PATRON-MISSING))
     
-    (asserts! (< (len current-reading-list) MAX-READING-LIST-SIZE) 
-              (err ERR-READING-LIST-FULL))
+    ;; Verify wishlist capacity
+    (asserts! (< (len patron-wishlist) WISHLIST-MAX-SIZE)
+              (err WISHLIST-OVERFLOW))
     
-    ;; Create checkout record
-    (map-set checkouts checkout-id
+    ;; Generate checkout record
+    (map-set checkout-records checkout-id
       {
-        patron: patron,
-        book-id: book-id,
-        checkout-date: checkout-time,
-        due-date: due-date,
-        is-returned: false,
-        fine-amount: u0
+        issuer: staff-member,
+        patron: target-patron,
+        publication-data: publication-info,
+        issue-timestamp: issue-time,
+        return-deadline: deadline,
+        completion-status: false,
+        penalty-amount: u0
       }
     )
     
-    ;; Mark book as unavailable
-    (map-set books book-id
-      (merge book-info { 
-        is-available: false,
-        total-borrows: (+ (get total-borrows book-info) u1)
+    ;; Update patron wishlist
+    (map-set patron-wishlists 
+             target-patron
+             (unwrap-panic (as-max-len? (append patron-wishlist checkout-id) u25)))
+    
+    ;; Update staff checkout history
+    (map-set archive-patrons staff-member
+      (merge staff-record { 
+        checkout-history: (+ (get checkout-history staff-record) u1)
       })
     )
     
-    ;; Add to patron's reading list
-    (map-set reading-lists patron
-      (unwrap-panic (as-max-len? (append current-reading-list checkout-id) u20))
-    )
-    
-    ;; Update patron's borrow count
-    (map-set patrons patron
-      (merge patron-info { 
-        total-borrowed: (+ (get total-borrowed patron-info) u1)
-      })
-    )
-    
-    (var-set total-checkouts (+ checkout-id u1))
+    ;; Update circulation counter
+    (var-set circulation-count (+ checkout-id u1))
     
     (ok checkout-id)
   )
 )
 
-;; Return a book
-(define-public (return-book (checkout-id uint))
+;; Publication return processing
+(define-public (complete-checkout (checkout-id uint))
   (let (
     (patron tx-sender)
-    (checkout-record (unwrap! (get-checkout checkout-id) (err ERR-BOOK-UNAVAILABLE)))
-    (book-info (unwrap! (get-book (get book-id checkout-record)) (err ERR-BOOK-NOT-FOUND)))
-    (patron-info (unwrap! (get-patron patron) (err ERR-PATRON-NOT-FOUND)))
-    (current-time (current-time))
-    (due-date (get due-date checkout-record))
-    (fine (if (> current-time due-date) (- current-time due-date) u0))
+    (checkout-info (unwrap! (fetch-checkout-record checkout-id) (err PUBLICATION-UNAVAILABLE)))
+    (current-time (fetch-timestamp))
+    (deadline (get return-deadline checkout-info))
+    (overdue-penalty (if (> current-time deadline) (- current-time deadline) u0))
   )
-    (asserts! (is-eq (get patron checkout-record) patron) 
-              (err ERR-UNAUTHORIZED))
+    ;; Validate patron authorization
+    (asserts! (is-eq (get patron checkout-info) patron) 
+              (err UNAUTHORIZED-ACCESS))
     
-    ;; Update checkout record
-    (map-set checkouts checkout-id
-      (merge checkout-record { 
-        is-returned: true,
-        fine-amount: fine
+    ;; Process return with penalty calculation
+    (map-set checkout-records checkout-id
+      (merge checkout-info { 
+        completion-status: true,
+        penalty-amount: overdue-penalty
       })
     )
     
-    ;; Mark book as available
-    (map-set books (get book-id checkout-record)
-      (merge book-info { is-available: true })
-    )
-    
-    ;; Add fine to patron's account if overdue
-    (if (> fine u0)
-        (map-set patrons patron
-          (merge patron-info { 
-            outstanding-fines: (+ (get outstanding-fines patron-info) fine)
-          }))
+    ;; Apply penalty if overdue
+    (if (> overdue-penalty u0)
+        (let ((patron-record (unwrap! (fetch-patron-info patron) (err PATRON-MISSING))))
+          (map-set archive-patrons patron
+            (merge patron-record { 
+              penalty-balance: (+ (get penalty-balance patron-record) overdue-penalty)
+            }))
+          true)
         true)
     
     (ok true)
   )
 )
 
-;; Pay fines
-(define-public (pay-fine (amount uint))
+;; Publication hold system
+(define-public (place-hold (publication-id uint))
   (let (
     (patron tx-sender)
-    (patron-info (unwrap! (get-patron patron) (err ERR-PATRON-NOT-FOUND)))
-    (current-fines (get outstanding-fines patron-info))
+    (hold-id (var-get hold-requests-total))
+    (request-time (fetch-timestamp))
+    (patron-hold-list (fetch-patron-holds patron))
+    (publication-info (unwrap! (fetch-publication-info publication-id) (err PUBLICATION-UNAVAILABLE)))
   )
-    (asserts! (<= amount current-fines) (err ERR-UNAUTHORIZED))
+    ;; Verify patron registration
+    (asserts! (validate-patron-status patron) 
+              (err PATRON-MISSING))
     
-    (map-set patrons patron
-      (merge patron-info { 
-        outstanding-fines: (- current-fines amount)
+    ;; Verify hold limit
+    (asserts! (< (len patron-hold-list) HOLD-REQUEST-LIMIT)
+              (err HOLD-QUOTA-EXCEEDED))
+    
+    ;; Confirm publication is unavailable
+    (asserts! (not (get availability-flag publication-info))
+              (err PUBLICATION-IN-USE))
+    
+    ;; Register hold request
+    (map-set hold-queue hold-id
+      {
+        target-publication: publication-id,
+        requesting-patron: patron,
+        request-timestamp: request-time,
+        queue-status: true
+      }
+    )
+    
+    ;; Update patron hold list
+    (map-set patron-holds 
+             patron
+             (unwrap-panic (as-max-len? (append patron-hold-list hold-id) u10)))
+    
+    ;; Update hold counter
+    (var-set hold-requests-total (+ hold-id u1))
+    
+    (ok hold-id)
+  )
+)
+
+;; Record archival system
+(define-public (remove-checkout-record (record-id uint))
+  (let (
+    (user tx-sender)
+    (record-data (unwrap! (fetch-checkout-record record-id) (err PUBLICATION-UNAVAILABLE)))
+  )
+    ;; Validate user permissions
+    (asserts! (or 
+               (is-eq (get issuer record-data) user)
+               (is-eq (get patron record-data) user))
+             (err UNAUTHORIZED-ACCESS))
+    
+    ;; Remove from patron wishlist if applicable
+    (if (is-eq (get patron record-data) user)
+        (begin
+          (var-set checkout-sequence-id record-id)
+          (map-set patron-wishlists 
+                   user 
+                   (fold filter-wishlist-items (fetch-patron-wishlist user) (list))))
+        true)
+    
+    ;; Archive the record
+    (map-delete checkout-records record-id)
+    
+    (ok true)
+  )
+)
+
+;; Wishlist filtering helper
+(define-private (filter-wishlist-items (item-id uint) (filtered-list (list 25 uint)))
+  (if (is-eq item-id (var-get checkout-sequence-id))
+      filtered-list
+      (unwrap-panic (as-max-len? (append filtered-list item-id) u25)))
+)
+
+;; Penalty payment processing
+(define-public (settle-penalties (payment-amount uint))
+  (let (
+    (patron tx-sender)
+    (patron-record (unwrap! (fetch-patron-info patron) (err PATRON-MISSING)))
+    (outstanding-balance (get penalty-balance patron-record))
+  )
+    ;; Validate payment amount
+    (asserts! (<= payment-amount outstanding-balance) (err UNAUTHORIZED-ACCESS))
+    
+    ;; Process payment
+    (map-set archive-patrons patron
+      (merge patron-record { 
+        penalty-balance: (- outstanding-balance payment-amount)
       })
     )
     
@@ -264,14 +367,52 @@
   )
 )
 
-;; Remove book from reading list
-(define-public (remove-from-reading-list (checkout-id uint))
+;; Patron ID card update
+(define-public (refresh-patron-card (updated-card (buff 33)))
   (let (
     (patron tx-sender)
-    (current-list (get-reading-list patron))
-    (filtered-list (filter (lambda (id) (not (is-eq id checkout-id))) current-list))
+    (patron-record (unwrap! (fetch-patron-info patron) (err PATRON-MISSING)))
   )
-    (map-set reading-lists patron filtered-list)
+    ;; Update patron card information
+    (map-set archive-patrons patron
+      (merge patron-record { patron-id: updated-card })
+    )
+    
     (ok true)
   )
+)
+
+;; Additional utility functions for enhanced uniqueness
+
+;; Patron activity summary
+(define-read-only (patron-activity-summary (patron principal))
+  (let (
+    (patron-info (fetch-patron-info patron))
+    (wishlist-size (len (fetch-patron-wishlist patron)))
+    (holds-count (len (fetch-patron-holds patron)))
+  )
+    (match patron-info
+      patron-data (some {
+        patron-status: (get account-status patron-data),
+        total-checkouts: (get checkout-history patron-data),
+        current-wishlist-items: wishlist-size,
+        active-holds: holds-count,
+        outstanding-penalties: (get penalty-balance patron-data),
+        membership-tier: (get access-level patron-data)
+      })
+      none
+    )
+  )
+)
+
+;; System health check
+(define-read-only (system-status-report)
+  {
+    platform-active: true,
+    total-circulation: (var-get circulation-count),
+    patron-base: (var-get registered-patrons),
+    catalog-entries: (var-get publication-inventory),
+    queue-depth: (var-get hold-requests-total),
+    system-timestamp: (fetch-timestamp)
+  }
 )
